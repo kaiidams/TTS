@@ -1,16 +1,25 @@
-import numpy
-import numpy as np
 import queue
-import torch
 import random
+
+import numpy as np
+import torch
 from torch.utils.data import Dataset
-from tqdm import tqdm
 
 
 class MyDataset(Dataset):
-    def __init__(self, ap, meta_data, voice_len=1.6, num_speakers_in_batch=64,
-                 storage_size=1, sample_from_storage_p=0.5, additive_noise=0,
-                 num_utter_per_speaker=10, skip_speakers=False, verbose=False):
+    def __init__(
+        self,
+        ap,
+        meta_data,
+        voice_len=1.6,
+        num_speakers_in_batch=64,
+        storage_size=1,
+        sample_from_storage_p=0.5,
+        additive_noise=0,
+        num_utter_per_speaker=10,
+        skip_speakers=False,
+        verbose=False,
+    ):
         """
         Args:
             ap (TTS.tts.utils.AudioProcessor): audio processor object.
@@ -18,6 +27,7 @@ class MyDataset(Dataset):
             seq_len (int): voice segment length in seconds.
             verbose (bool): print diagnostic information.
         """
+        super().__init__()
         self.items = meta_data
         self.sample_rate = ap.sample_rate
         self.voice_len = voice_len
@@ -28,7 +38,7 @@ class MyDataset(Dataset):
         self.ap = ap
         self.verbose = verbose
         self.__parse_items()
-        self.storage = queue.Queue(maxsize=storage_size*num_speakers_in_batch)
+        self.storage = queue.Queue(maxsize=storage_size * num_speakers_in_batch)
         self.sample_from_storage_p = float(sample_from_storage_p)
         self.additive_noise = float(additive_noise)
         if self.verbose:
@@ -69,11 +79,14 @@ class MyDataset(Dataset):
             if speaker_ in self.speaker_to_utters.keys():
                 self.speaker_to_utters[speaker_].append(path_)
             else:
-                self.speaker_to_utters[speaker_] = [path_, ]
+                self.speaker_to_utters[speaker_] = [
+                    path_,
+                ]
 
         if self.skip_speakers:
-            self.speaker_to_utters = {k: v for (k, v) in self.speaker_to_utters.items() if
-                                      len(v) >= self.num_utter_per_speaker}
+            self.speaker_to_utters = {
+                k: v for (k, v) in self.speaker_to_utters.items() if len(v) >= self.num_utter_per_speaker
+            }
 
         self.speakers = [k for (k, v) in self.speaker_to_utters.items()]
 
@@ -100,13 +113,9 @@ class MyDataset(Dataset):
     def __sample_speaker(self):
         speaker = random.sample(self.speakers, 1)[0]
         if self.num_utter_per_speaker > len(self.speaker_to_utters[speaker]):
-            utters = random.choices(
-                self.speaker_to_utters[speaker], k=self.num_utter_per_speaker
-            )
+            utters = random.choices(self.speaker_to_utters[speaker], k=self.num_utter_per_speaker)
         else:
-            utters = random.sample(
-                self.speaker_to_utters[speaker], self.num_utter_per_speaker
-            )
+            utters = random.sample(self.speaker_to_utters[speaker], self.num_utter_per_speaker)
         return speaker, utters
 
     def __sample_speaker_utterances(self, speaker):
@@ -155,12 +164,14 @@ class MyDataset(Dataset):
 
             # add random gaussian noise
             if self.additive_noise > 0:
-                noises_ = [numpy.random.normal(0, self.additive_noise, size=len(w)) for w in wavs_]
+                noises_ = [np.random.normal(0, self.additive_noise, size=len(w)) for w in wavs_]
                 wavs_ = [wavs_[i] + noises_[i] for i in range(len(wavs_))]
 
             # get a random subset of each of the wavs and convert to MFCC.
             offsets_ = [random.randint(0, wav.shape[0] - self.seq_len) for wav in wavs_]
-            mels_ = [self.ap.melspectrogram(wavs_[i][offsets_[i]: offsets_[i] + self.seq_len]) for i in range(len(wavs_))]
+            mels_ = [
+                self.ap.melspectrogram(wavs_[i][offsets_[i] : offsets_[i] + self.seq_len]) for i in range(len(wavs_))
+            ]
             feats_ = [torch.FloatTensor(mel) for mel in mels_]
 
             labels.append(labels_)

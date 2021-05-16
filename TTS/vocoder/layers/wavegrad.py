@@ -13,6 +13,7 @@ class Conv1d(nn.Conv1d):
 
 class PositionalEncoding(nn.Module):
     """Positional encoding with noise level conditioning"""
+
     def __init__(self, n_channels, max_len=10000):
         super().__init__()
         self.n_channels = n_channels
@@ -22,8 +23,8 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x, noise_level):
         if x.shape[2] > self.pe.shape[1]:
-            self.init_pe_matrix(x.shape[1] ,x.shape[2], x)
-        return x + noise_level[..., None, None] + self.pe[:, :x.size(2)].repeat(x.shape[0], 1, 1) / self.C
+            self.init_pe_matrix(x.shape[1], x.shape[2], x)
+        return x + noise_level[..., None, None] + self.pe[:, : x.size(2)].repeat(x.shape[0], 1, 1) / self.C
 
     def init_pe_matrix(self, n_channels, max_len, x):
         pe = torch.zeros(max_len, n_channels)
@@ -77,30 +78,18 @@ class UBlock(nn.Module):
 
         self.factor = factor
         self.res_block = Conv1d(input_size, hidden_size, 1)
-        self.main_block = nn.ModuleList([
-            Conv1d(input_size,
-                   hidden_size,
-                   3,
-                   dilation=dilation[0],
-                   padding=dilation[0]),
-            Conv1d(hidden_size,
-                   hidden_size,
-                   3,
-                   dilation=dilation[1],
-                   padding=dilation[1])
-        ])
-        self.out_block = nn.ModuleList([
-            Conv1d(hidden_size,
-                   hidden_size,
-                   3,
-                   dilation=dilation[2],
-                   padding=dilation[2]),
-            Conv1d(hidden_size,
-                   hidden_size,
-                   3,
-                   dilation=dilation[3],
-                   padding=dilation[3])
-        ])
+        self.main_block = nn.ModuleList(
+            [
+                Conv1d(input_size, hidden_size, 3, dilation=dilation[0], padding=dilation[0]),
+                Conv1d(hidden_size, hidden_size, 3, dilation=dilation[1], padding=dilation[1]),
+            ]
+        )
+        self.out_block = nn.ModuleList(
+            [
+                Conv1d(hidden_size, hidden_size, 3, dilation=dilation[2], padding=dilation[2]),
+                Conv1d(hidden_size, hidden_size, 3, dilation=dilation[3], padding=dilation[3]),
+            ]
+        )
 
     def forward(self, x, shift, scale):
         x_inter = F.interpolate(x, size=x.shape[-1] * self.factor)
@@ -145,11 +134,13 @@ class DBlock(nn.Module):
         super().__init__()
         self.factor = factor
         self.res_block = Conv1d(input_size, hidden_size, 1)
-        self.main_block = nn.ModuleList([
-            Conv1d(input_size, hidden_size, 3, dilation=1, padding=1),
-            Conv1d(hidden_size, hidden_size, 3, dilation=2, padding=2),
-            Conv1d(hidden_size, hidden_size, 3, dilation=4, padding=4),
-        ])
+        self.main_block = nn.ModuleList(
+            [
+                Conv1d(input_size, hidden_size, 3, dilation=1, padding=1),
+                Conv1d(hidden_size, hidden_size, 3, dilation=2, padding=2),
+                Conv1d(hidden_size, hidden_size, 3, dilation=4, padding=4),
+            ]
+        )
 
     def forward(self, x):
         size = x.shape[-1] // self.factor
@@ -171,5 +162,4 @@ class DBlock(nn.Module):
         self.res_block = weight_norm(self.res_block)
         for idx, layer in enumerate(self.main_block):
             if len(layer.state_dict()) != 0:
-               self.main_block[idx] = weight_norm(layer)
-
+                self.main_block[idx] = weight_norm(layer)

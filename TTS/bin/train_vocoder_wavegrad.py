@@ -1,25 +1,24 @@
-import argparse
-import glob
+#!/usr/bin/env python3
+"""Trains WaveGrad vocoder models."""
+
 import os
 import sys
 import time
 import traceback
-import numpy as np
 
+import numpy as np
 import torch
+
 # DISTRIBUTED
 from torch.nn.parallel import DistributedDataParallel as DDP_th
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+
+from TTS.utils.arguments import parse_arguments, process_args
 from TTS.utils.audio import AudioProcessor
-from TTS.utils.console_logger import ConsoleLogger
 from TTS.utils.distribute import init_distributed
-from TTS.utils.generic_utils import (KeepAverage, count_parameters,
-                                     create_experiment_folder, get_git_branch,
-                                     remove_experiment_folder, set_init_dict)
-from TTS.utils.io import copy_model_files, load_config
-from TTS.utils.tensorboard_logger import TensorboardLogger
+from TTS.utils.generic_utils import KeepAverage, count_parameters, remove_experiment_folder, set_init_dict
 from TTS.utils.training import setup_torch_training_env
 from TTS.vocoder.datasets.preprocess import load_wav_data, load_wav_feat_data
 from TTS.vocoder.datasets.wavegrad_dataset import WaveGradDataset
@@ -33,27 +32,29 @@ def setup_loader(ap, is_val=False, verbose=False):
     if is_val and not c.run_eval:
         loader = None
     else:
-        dataset = WaveGradDataset(ap=ap,
-                                items=eval_data if is_val else train_data,
-                                seq_len=c.seq_len,
-                                hop_len=ap.hop_length,
-                                pad_short=c.pad_short,
-                                conv_pad=c.conv_pad,
-                                is_training=not is_val,
-                                return_segments=True,
-                                use_noise_augment=False,
-                                use_cache=c.use_cache,
-                                verbose=verbose)
+        dataset = WaveGradDataset(
+            ap=ap,
+            items=eval_data if is_val else train_data,
+            seq_len=c.seq_len,
+            hop_len=ap.hop_length,
+            pad_short=c.pad_short,
+            conv_pad=c.conv_pad,
+            is_training=not is_val,
+            return_segments=True,
+            use_noise_augment=False,
+            use_cache=c.use_cache,
+            verbose=verbose,
+        )
         sampler = DistributedSampler(dataset) if num_gpus > 1 else None
-        loader = DataLoader(dataset,
-                            batch_size=c.batch_size,
-                            shuffle=num_gpus <= 1,
-                            drop_last=False,
-                            sampler=sampler,
-                            num_workers=c.num_val_loader_workers
-                            if is_val else c.num_loader_workers,
-                            pin_memory=False)
-
+        loader = DataLoader(
+            dataset,
+            batch_size=c.batch_size,
+            shuffle=num_gpus <= 1,
+            drop_last=False,
+            sampler=sampler,
+            num_workers=c.num_val_loader_workers if is_val else c.num_loader_workers,
+            pin_memory=False,
+        )
 
     return loader
 
@@ -79,23 +80,21 @@ def format_test_data(data):
     return m, x
 
 
-def train(model, criterion, optimizer,
-          scheduler, scaler, ap, global_step, epoch):
+def train(model, criterion, optimizer, scheduler, scaler, ap, global_step, epoch):
     data_loader = setup_loader(ap, is_val=False, verbose=(epoch == 0))
     model.train()
     epoch_time = 0
     keep_avg = KeepAverage()
     if use_cuda:
-        batch_n_iter = int(
-            len(data_loader.dataset) / (c.batch_size * num_gpus))
+        batch_n_iter = int(len(data_loader.dataset) / (c.batch_size * num_gpus))
     else:
         batch_n_iter = int(len(data_loader.dataset) / c.batch_size)
     end_time = time.time()
     c_logger.print_train_start()
     # setup noise schedule
-    noise_schedule = c['train_noise_schedule']
-    betas = np.linspace(noise_schedule['min_val'], noise_schedule['max_val'], noise_schedule['num_steps'])
-    if hasattr(model, 'module'):
+    noise_schedule = c["train_noise_schedule"]
+    betas = np.linspace(noise_schedule["min_val"], noise_schedule["max_val"], noise_schedule["num_steps"])
+    if hasattr(model, "module"):
         model.module.compute_noise_level(betas)
     else:
         model.compute_noise_level(betas)
@@ -110,7 +109,7 @@ def train(model, criterion, optimizer,
 
         with torch.cuda.amp.autocast(enabled=c.mixed_precision):
             # compute noisy input
-            if hasattr(model, 'module'):
+            if hasattr(model, "module"):
                 noise, x_noisy, noise_scale = model.module.compute_y_n(x)
             else:
                 noise, x_noisy, noise_scale = model.compute_y_n(x)
@@ -120,11 +119,11 @@ def train(model, criterion, optimizer,
 
             # compute losses
             loss = criterion(noise, noise_hat)
-        loss_wavegrad_dict = {'wavegrad_loss':loss}
+        loss_wavegrad_dict = {"wavegrad_loss": loss}
 
         # check nan loss
         if torch.isnan(loss).any():
-            raise RuntimeError(f'Detected NaN loss at step {global_step}.')
+            raise RuntimeError(f"Detected NaN loss at step {global_step}.")
 
         optimizer.zero_grad()
 
@@ -132,14 +131,12 @@ def train(model, criterion, optimizer,
         if c.mixed_precision:
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                           c.clip_grad)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), c.clip_grad)
             scaler.step(optimizer)
             scaler.update()
         else:
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                           c.clip_grad)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), c.clip_grad)
             optimizer.step()
 
         # schedule update
@@ -159,35 +156,30 @@ def train(model, criterion, optimizer,
         epoch_time += step_time
 
         # get current learning rates
-        current_lr = list(optimizer.param_groups)[0]['lr']
+        current_lr = list(optimizer.param_groups)[0]["lr"]
 
         # update avg stats
         update_train_values = dict()
         for key, value in loss_dict.items():
-            update_train_values['avg_' + key] = value
-        update_train_values['avg_loader_time'] = loader_time
-        update_train_values['avg_step_time'] = step_time
+            update_train_values["avg_" + key] = value
+        update_train_values["avg_loader_time"] = loader_time
+        update_train_values["avg_step_time"] = step_time
         keep_avg.update_values(update_train_values)
 
         # print training stats
         if global_step % c.print_step == 0:
             log_dict = {
-                'step_time': [step_time, 2],
-                'loader_time': [loader_time, 4],
+                "step_time": [step_time, 2],
+                "loader_time": [loader_time, 4],
                 "current_lr": current_lr,
-                "grad_norm": grad_norm.item()
+                "grad_norm": grad_norm.item(),
             }
-            c_logger.print_train_step(batch_n_iter, num_iter, global_step,
-                                      log_dict, loss_dict, keep_avg.avg_values)
+            c_logger.print_train_step(batch_n_iter, num_iter, global_step, log_dict, loss_dict, keep_avg.avg_values)
 
         if args.rank == 0:
             # plot step stats
             if global_step % 10 == 0:
-                iter_stats = {
-                    "lr": current_lr,
-                    "grad_norm": grad_norm.item(),
-                    "step_time": step_time
-                }
+                iter_stats = {"lr": current_lr, "grad_norm": grad_norm.item(), "step_time": step_time}
                 iter_stats.update(loss_dict)
                 tb_logger.tb_train_iter_stats(global_step, iter_stats)
 
@@ -195,17 +187,19 @@ def train(model, criterion, optimizer,
             if global_step % c.save_step == 0:
                 if c.checkpoint:
                     # save model
-                    save_checkpoint(model,
-                                    optimizer,
-                                    scheduler,
-                                    None,
-                                    None,
-                                    None,
-                                    global_step,
-                                    epoch,
-                                    OUT_PATH,
-                                    model_losses=loss_dict,
-                                    scaler=scaler.state_dict() if c.mixed_precision else None)
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        scheduler,
+                        None,
+                        None,
+                        None,
+                        global_step,
+                        epoch,
+                        OUT_PATH,
+                        model_losses=loss_dict,
+                        scaler=scaler.state_dict() if c.mixed_precision else None,
+                    )
 
         end_time = time.time()
 
@@ -241,19 +235,17 @@ def evaluate(model, criterion, ap, global_step, epoch):
         global_step += 1
 
         # compute noisy input
-        if hasattr(model, 'module'):
+        if hasattr(model, "module"):
             noise, x_noisy, noise_scale = model.module.compute_y_n(x)
         else:
             noise, x_noisy, noise_scale = model.compute_y_n(x)
-
 
         # forward pass
         noise_hat = model(x_noisy, m, noise_scale)
 
         # compute losses
         loss = criterion(noise, noise_hat)
-        loss_wavegrad_dict = {'wavegrad_loss':loss}
-
+        loss_wavegrad_dict = {"wavegrad_loss": loss}
 
         loss_dict = dict()
         for key, value in loss_wavegrad_dict.items():
@@ -268,9 +260,9 @@ def evaluate(model, criterion, ap, global_step, epoch):
         # update avg stats
         update_eval_values = dict()
         for key, value in loss_dict.items():
-            update_eval_values['avg_' + key] = value
-        update_eval_values['avg_loader_time'] = loader_time
-        update_eval_values['avg_step_time'] = step_time
+            update_eval_values["avg_" + key] = value
+        update_eval_values["avg_loader_time"] = loader_time
+        update_eval_values["avg_step_time"] = step_time
         keep_avg.update_values(update_eval_values)
 
         # print eval stats
@@ -283,9 +275,9 @@ def evaluate(model, criterion, ap, global_step, epoch):
         m, x = format_test_data(samples[0])
 
         # setup noise schedule and inference
-        noise_schedule = c['test_noise_schedule']
-        betas = np.linspace(noise_schedule['min_val'], noise_schedule['max_val'], noise_schedule['num_steps'])
-        if hasattr(model, 'module'):
+        noise_schedule = c["test_noise_schedule"]
+        betas = np.linspace(noise_schedule["min_val"], noise_schedule["max_val"], noise_schedule["num_steps"])
+        if hasattr(model, "module"):
             model.module.compute_noise_level(betas)
             # compute voice
             x_pred = model.module.inference(m)
@@ -295,13 +287,12 @@ def evaluate(model, criterion, ap, global_step, epoch):
             x_pred = model.inference(m)
 
         # compute spectrograms
-        figures = plot_results(x_pred, x, ap, global_step, 'eval')
+        figures = plot_results(x_pred, x, ap, global_step, "eval")
         tb_logger.tb_eval_figures(global_step, figures)
 
         # Sample audio
         sample_voice = x_pred[0].squeeze(0).detach().cpu().numpy()
-        tb_logger.tb_eval_audios(global_step, {'eval/audio': sample_voice},
-                                 c.audio["sample_rate"])
+        tb_logger.tb_eval_audios(global_step, {"eval/audio": sample_voice}, c.audio["sample_rate"])
 
         tb_logger.tb_eval_stats(global_step, keep_avg.avg_values)
         data_loader.dataset.return_segments = True
@@ -324,8 +315,7 @@ def main(args):  # pylint: disable=redefined-outer-name
 
     # DISTRUBUTED
     if num_gpus > 1:
-        init_distributed(args.rank, num_gpus, args.group_id,
-                         c.distributed["backend"], c.distributed["url"])
+        init_distributed(args.rank, num_gpus, args.group_id, c.distributed["backend"], c.distributed["url"])
 
     # setup models
     model = setup_generator(c)
@@ -338,23 +328,28 @@ def main(args):  # pylint: disable=redefined-outer-name
 
     # schedulers
     scheduler = None
-    if 'lr_scheduler' in c:
+    if "lr_scheduler" in c:
         scheduler = getattr(torch.optim.lr_scheduler, c.lr_scheduler)
         scheduler = scheduler(optimizer, **c.lr_scheduler_params)
 
     # setup criterion
     criterion = torch.nn.L1Loss().cuda()
 
+    if use_cuda:
+        model.cuda()
+        criterion.cuda()
+
     if args.restore_path:
-        checkpoint = torch.load(args.restore_path, map_location='cpu')
+        print(f" > Restoring from {os.path.basename(args.restore_path)}...")
+        checkpoint = torch.load(args.restore_path, map_location="cpu")
         try:
             print(" > Restoring Model...")
-            model.load_state_dict(checkpoint['model'])
+            model.load_state_dict(checkpoint["model"])
             print(" > Restoring Optimizer...")
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if 'scheduler' in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            if "scheduler" in checkpoint:
                 print(" > Restoring LR Scheduler...")
-                scheduler.load_state_dict(checkpoint['scheduler'])
+                scheduler.load_state_dict(checkpoint["scheduler"])
                 # NOTE: Not sure if necessary
                 scheduler.optimizer = optimizer
             if "scaler" in checkpoint and c.mixed_precision:
@@ -364,23 +359,18 @@ def main(args):  # pylint: disable=redefined-outer-name
             # retore only matching layers.
             print(" > Partial model initialization...")
             model_dict = model.state_dict()
-            model_dict = set_init_dict(model_dict, checkpoint['model'], c)
+            model_dict = set_init_dict(model_dict, checkpoint["model"], c)
             model.load_state_dict(model_dict)
             del model_dict
 
         # reset lr if not countinuining training.
         for group in optimizer.param_groups:
-            group['lr'] = c.lr
+            group["lr"] = c.lr
 
-        print(" > Model restored from step %d" % checkpoint['step'],
-              flush=True)
-        args.restore_step = checkpoint['step']
+        print(" > Model restored from step %d" % checkpoint["step"], flush=True)
+        args.restore_step = checkpoint["step"]
     else:
         args.restore_step = 0
-
-    if use_cuda:
-        model.cuda()
-        criterion.cuda()
 
     # DISTRUBUTED
     if num_gpus > 1:
@@ -389,113 +379,45 @@ def main(args):  # pylint: disable=redefined-outer-name
     num_params = count_parameters(model)
     print(" > WaveGrad has {} parameters".format(num_params), flush=True)
 
-    if 'best_loss' not in locals():
-        best_loss = float('inf')
+    if args.restore_step == 0 or not args.best_path:
+        best_loss = float("inf")
+        print(" > Starting with inf best loss.")
+    else:
+        print(" > Restoring best loss from " f"{os.path.basename(args.best_path)} ...")
+        best_loss = torch.load(args.best_path, map_location="cpu")["model_loss"]
+        print(f" > Starting with loaded last best loss {best_loss}.")
+    keep_all_best = c.get("keep_all_best", False)
+    keep_after = c.get("keep_after", 10000)  # void if keep_all_best False
 
     global_step = args.restore_step
     for epoch in range(0, c.epochs):
         c_logger.print_epoch_start(epoch, c.epochs)
-        _, global_step = train(model, criterion, optimizer,
-                               scheduler, scaler, ap, global_step,
-                               epoch)
-        eval_avg_loss_dict = evaluate(model, criterion, ap,
-                                      global_step, epoch)
+        _, global_step = train(model, criterion, optimizer, scheduler, scaler, ap, global_step, epoch)
+        eval_avg_loss_dict = evaluate(model, criterion, ap, global_step, epoch)
         c_logger.print_epoch_end(epoch, eval_avg_loss_dict)
         target_loss = eval_avg_loss_dict[c.target_loss]
-        best_loss = save_best_model(target_loss,
-                                    best_loss,
-                                    model,
-                                    optimizer,
-                                    scheduler,
-                                    None,
-                                    None,
-                                    None,
-                                    global_step,
-                                    epoch,
-                                    OUT_PATH,
-                                    model_losses=eval_avg_loss_dict,
-                                    scaler=scaler.state_dict() if c.mixed_precision else None)
+        best_loss = save_best_model(
+            target_loss,
+            best_loss,
+            model,
+            optimizer,
+            scheduler,
+            None,
+            None,
+            None,
+            global_step,
+            epoch,
+            OUT_PATH,
+            keep_all_best=keep_all_best,
+            keep_after=keep_after,
+            model_losses=eval_avg_loss_dict,
+            scaler=scaler.state_dict() if c.mixed_precision else None,
+        )
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--continue_path',
-        type=str,
-        help=
-        'Training output folder to continue training. Use to continue a training. If it is used, "config_path" is ignored.',
-        default='',
-        required='--config_path' not in sys.argv)
-    parser.add_argument(
-        '--restore_path',
-        type=str,
-        help='Model file to be restored. Use to finetune a model.',
-        default='')
-    parser.add_argument('--config_path',
-                        type=str,
-                        help='Path to config file for training.',
-                        required='--continue_path' not in sys.argv)
-    parser.add_argument('--debug',
-                        type=bool,
-                        default=False,
-                        help='Do not verify commit integrity to run training.')
-
-    # DISTRUBUTED
-    parser.add_argument(
-        '--rank',
-        type=int,
-        default=0,
-        help='DISTRIBUTED: process rank for distributed training.')
-    parser.add_argument('--group_id',
-                        type=str,
-                        default="",
-                        help='DISTRIBUTED: process group id.')
-    args = parser.parse_args()
-
-    if args.continue_path != '':
-        args.output_path = args.continue_path
-        args.config_path = os.path.join(args.continue_path, 'config.json')
-        list_of_files = glob.glob(
-            args.continue_path +
-            "/*.pth.tar")  # * means all if need specific format then *.csv
-        latest_model_file = max(list_of_files, key=os.path.getctime)
-        args.restore_path = latest_model_file
-        print(f" > Training continues for {args.restore_path}")
-
-    # setup output paths and read configs
-    c = load_config(args.config_path)
-    # check_config(c)
-    _ = os.path.dirname(os.path.realpath(__file__))
-
-    # DISTRIBUTED
-    if c.mixed_precision:
-        print("   >  Mixed precision is enabled")
-
-    OUT_PATH = args.continue_path
-    if args.continue_path == '':
-        OUT_PATH = create_experiment_folder(c.output_path, c.run_name,
-                                            args.debug)
-
-    AUDIO_PATH = os.path.join(OUT_PATH, 'test_audios')
-
-    c_logger = ConsoleLogger()
-
-    if args.rank == 0:
-        os.makedirs(AUDIO_PATH, exist_ok=True)
-        new_fields = {}
-        if args.restore_path:
-            new_fields["restore_path"] = args.restore_path
-        new_fields["github_branch"] = get_git_branch()
-        copy_model_files(c,  args.config_path,
-                         OUT_PATH, new_fields)
-        os.chmod(AUDIO_PATH, 0o775)
-        os.chmod(OUT_PATH, 0o775)
-
-        LOG_DIR = OUT_PATH
-        tb_logger = TensorboardLogger(LOG_DIR, model_name='VOCODER')
-
-        # write model desc to tensorboard
-        tb_logger.tb_add_text('model-description', c['run_description'], 0)
+if __name__ == "__main__":
+    args = parse_arguments(sys.argv)
+    c, OUT_PATH, AUDIO_PATH, c_logger, tb_logger = process_args(args, model_class="vocoder")
 
     try:
         main(args)

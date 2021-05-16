@@ -96,7 +96,7 @@
     // TACOTRON PRENET
     "memory_size": -1,             // ONLY TACOTRON - size of the memory queue used fro storing last decoder predictions for auto-regression. If < 0, memory queue is disabled and decoder only uses the last prediction frame.
     "prenet_type": "original",     // "original" or "bn".
-    "prenet_dropout": false,       // enable/disable dropout at prenet.
+    "prenet_dropout": true,       // enable/disable dropout at prenet.
 
     // TACOTRON ATTENTION
     "attention_type": "original",  // 'original' , 'graves', 'dynamic_convolution'
@@ -121,6 +121,8 @@
     "print_eval": false,     // If True, it prints intermediate loss values in evalulation.
     "save_step": 10000,      // Number of training steps expected to save traninpg stats and checkpoints.
     "checkpoint": true,     // If true, it saves checkpoints per "save_step"
+    "keep_all_best": false,  // If true, keeps all best_models after keep_after steps
+    "keep_after": 10000,    // Global step after which to keep best models if keep_all_best is true
     "tb_model_param_stats": false,     // true, plots param stats per layer on tensorboard. Might be memory consuming, but good for debugging.
 
     // DATA LOADING
@@ -169,4 +171,3 @@
             }
         ]
 }
-

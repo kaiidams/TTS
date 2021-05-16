@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+"""Train Glow TTS model."""
 
-import argparse
-import glob
 import os
 import sys
 import time
@@ -10,32 +8,31 @@ import traceback
 from random import randrange
 
 import torch
+
 # DISTRIBUTED
 from torch.nn.parallel import DistributedDataParallel as DDP_th
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+
 from TTS.tts.datasets.preprocess import load_meta_data
 from TTS.tts.datasets.TTSDataset import MyDataset
 from TTS.tts.layers.losses import GlowTTSLoss
-from TTS.tts.utils.generic_utils import check_config_tts, setup_model
+from TTS.tts.utils.generic_utils import setup_model
 from TTS.tts.utils.io import save_best_model, save_checkpoint
 from TTS.tts.utils.measures import alignment_diagonal_score
 from TTS.tts.utils.speakers import parse_speakers
 from TTS.tts.utils.synthesis import synthesis
 from TTS.tts.utils.text.symbols import make_symbols, phonemes, symbols
 from TTS.tts.utils.visual import plot_alignment, plot_spectrogram
+from TTS.utils.arguments import parse_arguments, process_args
 from TTS.utils.audio import AudioProcessor
-from TTS.utils.console_logger import ConsoleLogger
 from TTS.utils.distribute import init_distributed, reduce_tensor
-from TTS.utils.generic_utils import (KeepAverage, count_parameters,
-                                     create_experiment_folder, get_git_branch,
-                                     remove_experiment_folder, set_init_dict)
-from TTS.utils.io import copy_model_files, load_config
+from TTS.utils.generic_utils import KeepAverage, count_parameters, remove_experiment_folder, set_init_dict
 from TTS.utils.radam import RAdam
-from TTS.utils.tensorboard_logger import TensorboardLogger
 from TTS.utils.training import NoamLR, setup_torch_training_env
 
 use_cuda, num_gpus = setup_torch_training_env(True, False)
+
 
 def setup_loader(ap, r, is_val=False, verbose=False):
     if is_val and not c.run_eval:
@@ -47,19 +44,21 @@ def setup_loader(ap, r, is_val=False, verbose=False):
             compute_linear_spec=False,
             meta_data=meta_data_eval if is_val else meta_data_train,
             ap=ap,
-            tp=c.characters if 'characters' in c.keys() else None,
-            add_blank=c['add_blank'] if 'add_blank' in c.keys() else False,
-            batch_group_size=0 if is_val else c.batch_group_size *
-            c.batch_size,
+            tp=c.characters if "characters" in c.keys() else None,
+            add_blank=c["add_blank"] if "add_blank" in c.keys() else False,
+            batch_group_size=0 if is_val else c.batch_group_size * c.batch_size,
             min_seq_len=c.min_seq_len,
             max_seq_len=c.max_seq_len,
             phoneme_cache_path=c.phoneme_cache_path,
             use_phonemes=c.use_phonemes,
             phoneme_language=c.phoneme_language,
             enable_eos_bos=c.enable_eos_bos_chars,
-            use_noise_augment=c['use_noise_augment'] and not is_val,
+            use_noise_augment=c["use_noise_augment"] and not is_val,
             verbose=verbose,
-            speaker_mapping=speaker_mapping if c.use_speaker_embedding and c.use_external_speaker_embedding_file else None)
+            speaker_mapping=speaker_mapping
+            if c.use_speaker_embedding and c.use_external_speaker_embedding_file
+            else None,
+        )
 
         if c.use_phonemes and c.compute_input_seq_cache:
             # precompute phonemes to have a better estimate of sequence lengths.
@@ -74,9 +73,9 @@ def setup_loader(ap, r, is_val=False, verbose=False):
             collate_fn=dataset.collate_fn,
             drop_last=False,
             sampler=sampler,
-            num_workers=c.num_val_loader_workers
-            if is_val else c.num_loader_workers,
-            pin_memory=False)
+            num_workers=c.num_val_loader_workers if is_val else c.num_loader_workers,
+            pin_memory=False,
+        )
     return loader
 
 
@@ -98,9 +97,7 @@ def format_data(data):
             speaker_c = data[8]
         else:
             # return speaker_id to be used by an embedding layer
-            speaker_c = [
-                speaker_mapping[speaker_name] for speaker_name in speaker_names
-            ]
+            speaker_c = [speaker_mapping[speaker_name] for speaker_name in speaker_names]
             speaker_c = torch.LongTensor(speaker_c)
     else:
         speaker_c = None
@@ -115,13 +112,22 @@ def format_data(data):
             speaker_c = speaker_c.cuda(non_blocking=True)
         if attn_mask is not None:
             attn_mask = attn_mask.cuda(non_blocking=True)
-    return text_input, text_lengths, mel_input, mel_lengths, speaker_c,\
-         avg_text_length, avg_spec_length, attn_mask, item_idx
+    return (
+        text_input,
+        text_lengths,
+        mel_input,
+        mel_lengths,
+        speaker_c,
+        avg_text_length,
+        avg_spec_length,
+        attn_mask,
+        item_idx,
+    )
 
 
-def data_depended_init(data_loader, model, ap):
+def data_depended_init(data_loader, model):
     """Data depended initialization for activation normalization."""
-    if hasattr(model, 'module'):
+    if hasattr(model, "module"):
         for f in model.module.decoder.flows:
             if getattr(f, "set_ddi", False):
                 f.set_ddi(True)
@@ -137,17 +143,15 @@ def data_depended_init(data_loader, model, ap):
         for _, data in enumerate(data_loader):
 
             # format data
-            text_input, text_lengths, mel_input, mel_lengths, spekaer_embed,\
-                _, _, attn_mask, item_idx = format_data(data)
+            text_input, text_lengths, mel_input, mel_lengths, spekaer_embed, _, _, attn_mask, _ = format_data(data)
 
             # forward pass model
-            _ = model.forward(
-                text_input, text_lengths, mel_input, mel_lengths, attn_mask, g=spekaer_embed)
+            _ = model.forward(text_input, text_lengths, mel_input, mel_lengths, attn_mask, g=spekaer_embed)
             if num_iter == c.data_dep_init_iter:
                 break
             num_iter += 1
 
-    if hasattr(model, 'module'):
+    if hasattr(model, "module"):
         for f in model.module.decoder.flows:
             if getattr(f, "set_ddi", False):
                 f.set_ddi(False)
@@ -158,15 +162,13 @@ def data_depended_init(data_loader, model, ap):
     return model
 
 
-def train(data_loader, model, criterion, optimizer, scheduler,
-          ap, global_step, epoch):
+def train(data_loader, model, criterion, optimizer, scheduler, ap, global_step, epoch):
 
     model.train()
     epoch_time = 0
     keep_avg = KeepAverage()
     if use_cuda:
-        batch_n_iter = int(
-            len(data_loader.dataset) / (c.batch_size * num_gpus))
+        batch_n_iter = int(len(data_loader.dataset) / (c.batch_size * num_gpus))
     else:
         batch_n_iter = int(len(data_loader.dataset) / c.batch_size)
     end_time = time.time()
@@ -176,8 +178,17 @@ def train(data_loader, model, criterion, optimizer, scheduler,
         start_time = time.time()
 
         # format data
-        text_input, text_lengths, mel_input, mel_lengths, speaker_c,\
-            avg_text_length, avg_spec_length, attn_mask, item_idx = format_data(data)
+        (
+            text_input,
+            text_lengths,
+            mel_input,
+            mel_lengths,
+            speaker_c,
+            avg_text_length,
+            avg_spec_length,
+            attn_mask,
+            _,
+        ) = format_data(data)
 
         loader_time = time.time() - end_time
 
@@ -187,24 +198,22 @@ def train(data_loader, model, criterion, optimizer, scheduler,
         # forward pass model
         with torch.cuda.amp.autocast(enabled=c.mixed_precision):
             z, logdet, y_mean, y_log_scale, alignments, o_dur_log, o_total_dur = model.forward(
-                text_input, text_lengths, mel_input, mel_lengths, attn_mask, g=speaker_c)
+                text_input, text_lengths, mel_input, mel_lengths, attn_mask, g=speaker_c
+            )
 
             # compute loss
-            loss_dict = criterion(z, y_mean, y_log_scale, logdet, mel_lengths,
-                                o_dur_log, o_total_dur, text_lengths)
+            loss_dict = criterion(z, y_mean, y_log_scale, logdet, mel_lengths, o_dur_log, o_total_dur, text_lengths)
 
         # backward pass with loss scaling
         if c.mixed_precision:
-            scaler.scale(loss_dict['loss']).backward()
+            scaler.scale(loss_dict["loss"]).backward()
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                           c.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
-            loss_dict['loss'].backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                           c.grad_clip)
+            loss_dict["loss"].backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip)
             optimizer.step()
 
         # setup lr
@@ -212,20 +221,20 @@ def train(data_loader, model, criterion, optimizer, scheduler,
             scheduler.step()
 
         # current_lr
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = optimizer.param_groups[0]["lr"]
 
         # compute alignment error (the lower the better )
         align_error = 1 - alignment_diagonal_score(alignments, binary=True)
-        loss_dict['align_error'] = align_error
+        loss_dict["align_error"] = align_error
 
         step_time = time.time() - start_time
         epoch_time += step_time
 
         # aggregate losses from processes
         if num_gpus > 1:
-            loss_dict['log_mle'] = reduce_tensor(loss_dict['log_mle'].data, num_gpus)
-            loss_dict['loss_dur'] = reduce_tensor(loss_dict['loss_dur'].data, num_gpus)
-            loss_dict['loss'] = reduce_tensor(loss_dict['loss'] .data, num_gpus)
+            loss_dict["log_mle"] = reduce_tensor(loss_dict["log_mle"].data, num_gpus)
+            loss_dict["loss_dur"] = reduce_tensor(loss_dict["loss_dur"].data, num_gpus)
+            loss_dict["loss"] = reduce_tensor(loss_dict["loss"].data, num_gpus)
 
         # detach loss values
         loss_dict_new = dict()
@@ -239,9 +248,9 @@ def train(data_loader, model, criterion, optimizer, scheduler,
         # update avg stats
         update_train_values = dict()
         for key, value in loss_dict.items():
-            update_train_values['avg_' + key] = value
-        update_train_values['avg_loader_time'] = loader_time
-        update_train_values['avg_step_time'] = step_time
+            update_train_values["avg_" + key] = value
+        update_train_values["avg_loader_time"] = loader_time
+        update_train_values["avg_step_time"] = step_time
         keep_avg.update_values(update_train_values)
 
         # print training progress
@@ -253,26 +262,29 @@ def train(data_loader, model, criterion, optimizer, scheduler,
                 "loader_time": [loader_time, 2],
                 "current_lr": current_lr,
             }
-            c_logger.print_train_step(batch_n_iter, num_iter, global_step,
-                                      log_dict, loss_dict, keep_avg.avg_values)
+            c_logger.print_train_step(batch_n_iter, num_iter, global_step, log_dict, loss_dict, keep_avg.avg_values)
 
         if args.rank == 0:
             # Plot Training Iter Stats
             # reduce TB load
             if global_step % c.tb_plot_step == 0:
-                iter_stats = {
-                    "lr": current_lr,
-                    "grad_norm": grad_norm,
-                    "step_time": step_time
-                }
+                iter_stats = {"lr": current_lr, "grad_norm": grad_norm, "step_time": step_time}
                 iter_stats.update(loss_dict)
                 tb_logger.tb_train_iter_stats(global_step, iter_stats)
 
             if global_step % c.save_step == 0:
                 if c.checkpoint:
                     # save model
-                    save_checkpoint(model, optimizer, global_step, epoch, 1, OUT_PATH,
-                                    model_loss=loss_dict['loss'])
+                    save_checkpoint(
+                        model,
+                        optimizer,
+                        global_step,
+                        epoch,
+                        1,
+                        OUT_PATH,
+                        model_characters,
+                        model_loss=loss_dict["loss"],
+                    )
 
                 # wait all kernels to be completed
                 torch.cuda.synchronize()
@@ -281,7 +293,7 @@ def train(data_loader, model, criterion, optimizer, scheduler,
                 # direct pass on model for spec predictions
                 target_speaker = None if speaker_c is None else speaker_c[:1]
 
-                if hasattr(model, 'module'):
+                if hasattr(model, "module"):
                     spec_pred, *_ = model.module.inference(text_input[:1], text_lengths[:1], g=target_speaker)
                 else:
                     spec_pred, *_ = model.inference(text_input[:1], text_lengths[:1], g=target_speaker)
@@ -302,9 +314,7 @@ def train(data_loader, model, criterion, optimizer, scheduler,
 
                 # Sample audio
                 train_audio = ap.inv_melspectrogram(const_spec.T)
-                tb_logger.tb_train_audios(global_step,
-                                          {'TrainAudio': train_audio},
-                                          c.audio["sample_rate"])
+                tb_logger.tb_train_audios(global_step, {"TrainAudio": train_audio}, c.audio["sample_rate"])
         end_time = time.time()
 
     # print epoch stats
@@ -331,16 +341,15 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
             start_time = time.time()
 
             # format data
-            text_input, text_lengths, mel_input, mel_lengths, speaker_c,\
-                _, _, attn_mask, item_idx = format_data(data)
+            text_input, text_lengths, mel_input, mel_lengths, speaker_c, _, _, attn_mask, _ = format_data(data)
 
             # forward pass model
             z, logdet, y_mean, y_log_scale, alignments, o_dur_log, o_total_dur = model.forward(
-                text_input, text_lengths, mel_input, mel_lengths, attn_mask, g=speaker_c)
+                text_input, text_lengths, mel_input, mel_lengths, attn_mask, g=speaker_c
+            )
 
             # compute loss
-            loss_dict = criterion(z, y_mean, y_log_scale, logdet, mel_lengths,
-                                  o_dur_log, o_total_dur, text_lengths)
+            loss_dict = criterion(z, y_mean, y_log_scale, logdet, mel_lengths, o_dur_log, o_total_dur, text_lengths)
 
             # step time
             step_time = time.time() - start_time
@@ -348,13 +357,13 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
 
             # compute alignment score
             align_error = 1 - alignment_diagonal_score(alignments)
-            loss_dict['align_error'] = align_error
+            loss_dict["align_error"] = align_error
 
             # aggregate losses from processes
             if num_gpus > 1:
-                loss_dict['log_mle'] = reduce_tensor(loss_dict['log_mle'].data, num_gpus)
-                loss_dict['loss_dur'] = reduce_tensor(loss_dict['loss_dur'].data, num_gpus)
-                loss_dict['loss'] = reduce_tensor(loss_dict['loss'] .data, num_gpus)
+                loss_dict["log_mle"] = reduce_tensor(loss_dict["log_mle"].data, num_gpus)
+                loss_dict["loss_dur"] = reduce_tensor(loss_dict["loss_dur"].data, num_gpus)
+                loss_dict["loss"] = reduce_tensor(loss_dict["loss"].data, num_gpus)
 
             # detach loss values
             loss_dict_new = dict()
@@ -368,7 +377,7 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
             # update avg stats
             update_train_values = dict()
             for key, value in loss_dict.items():
-                update_train_values['avg_' + key] = value
+                update_train_values["avg_" + key] = value
             keep_avg.update_values(update_train_values)
 
             if c.print_eval:
@@ -378,7 +387,7 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
             # Diagnostic visualizations
             # direct pass on model for spec predictions
             target_speaker = None if speaker_c is None else speaker_c[:1]
-            if hasattr(model, 'module'):
+            if hasattr(model, "module"):
                 spec_pred, *_ = model.module.inference(text_input[:1], text_lengths[:1], g=target_speaker)
             else:
                 spec_pred, *_ = model.inference(text_input[:1], text_lengths[:1], g=target_speaker)
@@ -392,13 +401,12 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
             eval_figures = {
                 "prediction": plot_spectrogram(const_spec, ap),
                 "ground_truth": plot_spectrogram(gt_spec, ap),
-                "alignment": plot_alignment(align_img)
+                "alignment": plot_alignment(align_img),
             }
 
             # Sample audio
             eval_audio = ap.inv_melspectrogram(const_spec.T)
-            tb_logger.tb_eval_audios(global_step, {"ValAudio": eval_audio},
-                                     c.audio["sample_rate"])
+            tb_logger.tb_eval_audios(global_step, {"ValAudio": eval_audio}, c.audio["sample_rate"])
 
             # Plot Validation Stats
             tb_logger.tb_eval_stats(global_step, keep_avg.avg_values)
@@ -411,7 +419,7 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
                 "Be a voice, not an echo.",
                 "I'm sorry Dave. I'm afraid I can't do that.",
                 "This cake is great. It's so delicious and moist.",
-                "Prior to November 22, 1963."
+                "Prior to November 22, 1963.",
             ]
         else:
             with open(c.test_sentences_file, "r") as f:
@@ -423,7 +431,9 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
         print(" | > Synthesizing test sentences")
         if c.use_speaker_embedding:
             if c.use_external_speaker_embedding_file:
-                speaker_embedding = speaker_mapping[list(speaker_mapping.keys())[randrange(len(speaker_mapping)-1)]]['embedding']
+                speaker_embedding = speaker_mapping[list(speaker_mapping.keys())[randrange(len(speaker_mapping) - 1)]][
+                    "embedding"
+                ]
                 speaker_id = None
             else:
                 speaker_id = 0
@@ -445,52 +455,50 @@ def evaluate(data_loader, model, criterion, ap, global_step, epoch):
                     speaker_embedding=speaker_embedding,
                     style_wav=style_wav,
                     truncated=False,
-                    enable_eos_bos_chars=c.enable_eos_bos_chars, #pylint: disable=unused-argument
+                    enable_eos_bos_chars=c.enable_eos_bos_chars,  # pylint: disable=unused-argument
                     use_griffin_lim=True,
-                    do_trim_silence=False)
+                    do_trim_silence=False,
+                )
 
                 file_path = os.path.join(AUDIO_PATH, str(global_step))
                 os.makedirs(file_path, exist_ok=True)
-                file_path = os.path.join(file_path,
-                                         "TestSentence_{}.wav".format(idx))
+                file_path = os.path.join(file_path, "TestSentence_{}.wav".format(idx))
                 ap.save_wav(wav, file_path)
-                test_audios['{}-audio'.format(idx)] = wav
-                test_figures['{}-prediction'.format(idx)] = plot_spectrogram(
-                    postnet_output, ap)
-                test_figures['{}-alignment'.format(idx)] = plot_alignment(
-                    alignment)
-            except: #pylint: disable=bare-except
+                test_audios["{}-audio".format(idx)] = wav
+                test_figures["{}-prediction".format(idx)] = plot_spectrogram(postnet_output, ap)
+                test_figures["{}-alignment".format(idx)] = plot_alignment(alignment)
+            except:  # pylint: disable=bare-except
                 print(" !! Error creating Test Sentence -", idx)
                 traceback.print_exc()
-        tb_logger.tb_test_audios(global_step, test_audios,
-                                 c.audio['sample_rate'])
+        tb_logger.tb_test_audios(global_step, test_audios, c.audio["sample_rate"])
         tb_logger.tb_test_figures(global_step, test_figures)
     return keep_avg.avg_values
 
 
-# FIXME: move args definition/parsing inside of main?
 def main(args):  # pylint: disable=redefined-outer-name
     # pylint: disable=global-variable-undefined
-    global meta_data_train, meta_data_eval, symbols, phonemes, speaker_mapping
+    global meta_data_train, meta_data_eval, symbols, phonemes, model_characters, speaker_mapping
     # Audio processor
     ap = AudioProcessor(**c.audio)
-    if 'characters' in c.keys():
+    if "characters" in c.keys():
         symbols, phonemes = make_symbols(**c.characters)
 
     # DISTRUBUTED
     if num_gpus > 1:
-        init_distributed(args.rank, num_gpus, args.group_id,
-                         c.distributed["backend"], c.distributed["url"])
-    num_chars = len(phonemes) if c.use_phonemes else len(symbols)
+        init_distributed(args.rank, num_gpus, args.group_id, c.distributed["backend"], c.distributed["url"])
+
+    # set model characters
+    model_characters = phonemes if c.use_phonemes else symbols
+    num_chars = len(model_characters)
 
     # load data instances
     meta_data_train, meta_data_eval = load_meta_data(c.datasets)
 
     # set the portion of the data used for training
-    if 'train_portion' in c.keys():
-        meta_data_train = meta_data_train[:int(len(meta_data_train) * c.train_portion)]
-    if 'eval_portion' in c.keys():
-        meta_data_eval = meta_data_eval[:int(len(meta_data_eval) * c.eval_portion)]
+    if "train_portion" in c.keys():
+        meta_data_train = meta_data_train[: int(len(meta_data_train) * c.train_portion)]
+    if "eval_portion" in c.keys():
+        meta_data_eval = meta_data_eval[: int(len(meta_data_eval) * c.eval_portion)]
 
     # parse speakers
     num_speakers, speaker_embedding_dim, speaker_mapping = parse_speakers(c, args, meta_data_train, OUT_PATH)
@@ -501,26 +509,26 @@ def main(args):  # pylint: disable=redefined-outer-name
     criterion = GlowTTSLoss()
 
     if args.restore_path:
-        checkpoint = torch.load(args.restore_path, map_location='cpu')
+        print(f" > Restoring from {os.path.basename(args.restore_path)} ...")
+        checkpoint = torch.load(args.restore_path, map_location="cpu")
         try:
             # TODO: fix optimizer init, model.cuda() needs to be called before
             # optimizer restore
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            optimizer.load_state_dict(checkpoint["optimizer"])
             if c.reinit_layers:
                 raise RuntimeError
-            model.load_state_dict(checkpoint['model'])
-        except: #pylint: disable=bare-except
+            model.load_state_dict(checkpoint["model"])
+        except:  # pylint: disable=bare-except
             print(" > Partial model initialization.")
             model_dict = model.state_dict()
-            model_dict = set_init_dict(model_dict, checkpoint['model'], c)
+            model_dict = set_init_dict(model_dict, checkpoint["model"], c)
             model.load_state_dict(model_dict)
             del model_dict
 
         for group in optimizer.param_groups:
-            group['initial_lr'] = c.lr
-        print(" > Model restored from step %d" % checkpoint['step'],
-              flush=True)
-        args.restore_step = checkpoint['step']
+            group["initial_lr"] = c.lr
+        print(f" > Model restored from step {checkpoint['step']:d}", flush=True)
+        args.restore_step = checkpoint["step"]
     else:
         args.restore_step = 0
 
@@ -533,115 +541,57 @@ def main(args):  # pylint: disable=redefined-outer-name
         model = DDP_th(model, device_ids=[args.rank])
 
     if c.noam_schedule:
-        scheduler = NoamLR(optimizer,
-                           warmup_steps=c.warmup_steps,
-                           last_epoch=args.restore_step - 1)
+        scheduler = NoamLR(optimizer, warmup_steps=c.warmup_steps, last_epoch=args.restore_step - 1)
     else:
         scheduler = None
 
     num_params = count_parameters(model)
     print("\n > Model has {} parameters".format(num_params), flush=True)
 
-    if 'best_loss' not in locals():
-        best_loss = float('inf')
+    if args.restore_step == 0 or not args.best_path:
+        best_loss = float("inf")
+        print(" > Starting with inf best loss.")
+    else:
+        print(" > Restoring best loss from " f"{os.path.basename(args.best_path)} ...")
+        best_loss = torch.load(args.best_path, map_location="cpu")["model_loss"]
+        print(f" > Starting with loaded last best loss {best_loss}.")
+    keep_all_best = c.get("keep_all_best", False)
+    keep_after = c.get("keep_after", 10000)  # void if keep_all_best False
 
     # define dataloaders
     train_loader = setup_loader(ap, 1, is_val=False, verbose=True)
     eval_loader = setup_loader(ap, 1, is_val=True, verbose=True)
 
     global_step = args.restore_step
-    model = data_depended_init(train_loader, model, ap)
+    model = data_depended_init(train_loader, model)
     for epoch in range(0, c.epochs):
         c_logger.print_epoch_start(epoch, c.epochs)
-        train_avg_loss_dict, global_step = train(train_loader, model, criterion, optimizer,
-                                                 scheduler, ap, global_step,
-                                                 epoch)
-        eval_avg_loss_dict = evaluate(eval_loader , model, criterion, ap, global_step, epoch)
+        train_avg_loss_dict, global_step = train(
+            train_loader, model, criterion, optimizer, scheduler, ap, global_step, epoch
+        )
+        eval_avg_loss_dict = evaluate(eval_loader, model, criterion, ap, global_step, epoch)
         c_logger.print_epoch_end(epoch, eval_avg_loss_dict)
-        target_loss = train_avg_loss_dict['avg_loss']
+        target_loss = train_avg_loss_dict["avg_loss"]
         if c.run_eval:
-            target_loss = eval_avg_loss_dict['avg_loss']
-        best_loss = save_best_model(target_loss, best_loss, model, optimizer, global_step, epoch, c.r,
-                                    OUT_PATH)
+            target_loss = eval_avg_loss_dict["avg_loss"]
+        best_loss = save_best_model(
+            target_loss,
+            best_loss,
+            model,
+            optimizer,
+            global_step,
+            epoch,
+            c.r,
+            OUT_PATH,
+            model_characters,
+            keep_all_best=keep_all_best,
+            keep_after=keep_after,
+        )
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--continue_path',
-        type=str,
-        help='Training output folder to continue training. Use to continue a training. If it is used, "config_path" is ignored.',
-        default='',
-        required='--config_path' not in sys.argv)
-    parser.add_argument(
-        '--restore_path',
-        type=str,
-        help='Model file to be restored. Use to finetune a model.',
-        default='')
-    parser.add_argument(
-        '--config_path',
-        type=str,
-        help='Path to config file for training.',
-        required='--continue_path' not in sys.argv
-    )
-    parser.add_argument('--debug',
-                        type=bool,
-                        default=False,
-                        help='Do not verify commit integrity to run training.')
-
-    # DISTRUBUTED
-    parser.add_argument(
-        '--rank',
-        type=int,
-        default=0,
-        help='DISTRIBUTED: process rank for distributed training.')
-    parser.add_argument('--group_id',
-                        type=str,
-                        default="",
-                        help='DISTRIBUTED: process group id.')
-    args = parser.parse_args()
-
-    if args.continue_path != '':
-        args.output_path = args.continue_path
-        args.config_path = os.path.join(args.continue_path, 'config.json')
-        list_of_files = glob.glob(args.continue_path + "/*.pth.tar") # * means all if need specific format then *.csv
-        latest_model_file = max(list_of_files, key=os.path.getctime)
-        args.restore_path = latest_model_file
-        print(f" > Training continues for {args.restore_path}")
-
-    # setup output paths and read configs
-    c = load_config(args.config_path)
-    # check_config(c)
-    check_config_tts(c)
-    _ = os.path.dirname(os.path.realpath(__file__))
-
-    if c.mixed_precision:
-        print("   > Mixed precision enabled.")
-
-    OUT_PATH = args.continue_path
-    if args.continue_path == '':
-        OUT_PATH = create_experiment_folder(c.output_path, c.run_name, args.debug)
-
-    AUDIO_PATH = os.path.join(OUT_PATH, 'test_audios')
-
-    c_logger = ConsoleLogger()
-
-    if args.rank == 0:
-        os.makedirs(AUDIO_PATH, exist_ok=True)
-        new_fields = {}
-        if args.restore_path:
-            new_fields["restore_path"] = args.restore_path
-        new_fields["github_branch"] = get_git_branch()
-        copy_model_files(c,  args.config_path,
-                         OUT_PATH, new_fields)
-        os.chmod(AUDIO_PATH, 0o775)
-        os.chmod(OUT_PATH, 0o775)
-
-        LOG_DIR = OUT_PATH
-        tb_logger = TensorboardLogger(LOG_DIR, model_name='TTS')
-
-        # write model desc to tensorboard
-        tb_logger.tb_add_text('model-description', c['run_description'], 0)
+if __name__ == "__main__":
+    args = parse_arguments(sys.argv)
+    c, OUT_PATH, AUDIO_PATH, c_logger, tb_logger = process_args(args, model_class="tts")
 
     try:
         main(args)
