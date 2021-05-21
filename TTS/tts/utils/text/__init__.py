@@ -43,6 +43,10 @@ def text2phone(text, language):
     if language == "zh-CN":
         ph = chinese_text_to_phonemes(text)
         return ph
+    elif language == "ja-JP":
+        from TTS.tts.utils.japanese.phonemizer import japanese_text_to_phonemes
+        ph = japanese_text_to_phonemes(text)
+        return ph
 
     seperator = phonemizer.separator.Separator(" |", "", "|")
     # try:
