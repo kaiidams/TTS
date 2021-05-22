@@ -44,8 +44,8 @@ def text2phone(text, language):
         ph = chinese_text_to_phonemes(text)
         return ph
     elif language == "ja-jp":
-        from TTS.tts.utils.japanese.phonemizer import japanese_text_to_phonemes
-        ph = japanese_text_to_phonemes(text)
+        from TTS.tts.utils.japanese import japanese_text2phone
+        ph = japanese_text2phone(text)
         return ph
 
     seperator = phonemizer.separator.Separator(" |", "", "|")

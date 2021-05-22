@@ -1,5 +1,5 @@
 import unittest
-from .phonemizer import japanese_text_to_phonemes
+from . import japanese_text2phone
 
 _TEST_CASES = '''
 どちらに行きますか？/dochiraniikimasuka?
@@ -8,14 +8,15 @@ _TEST_CASES = '''
 そうですね！/so:desune!
 クジラは哺乳類です。/kujirawahonyu:ruidesu.
 ヴィディオを見ます。/bidioomimasu.
+ky o: w a o N s e N n i , i k i m a s u ./kyo:waoNseNni,ikimasu.
 '''
 
-class TestPhonemizer(unittest.TestCase):
+class TestText(unittest.TestCase):
 
-    def test_phonemizer(self):
+    def test_text2phone(self):
         for line in _TEST_CASES.strip().split('\n'):
-            text, phonemes = line.split('/')
-            self.assertEqual(japanese_text_to_phonemes(text), phonemes)
+            text, phone = line.split('/')
+            self.assertEqual(japanese_text2phone(text), phone)
 
 if __name__ == '__main__':
     unittest.main()
