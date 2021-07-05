@@ -36,7 +36,7 @@ def preprocess_wav_files(out_path: str, config: Coqpit, ap: AudioProcessor):
 
 
 def find_wav_files(data_path):
-    wav_paths = glob.glob(os.path.join(data_path, "**", "*.wav"), recursive=True)
+    wav_paths = glob.glob(os.path.join(data_path, "**", "*.flac"), recursive=True)
     return wav_paths
 
 
