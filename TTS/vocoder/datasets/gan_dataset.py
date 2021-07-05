@@ -63,7 +63,7 @@ class GANDataset(Dataset):
 
     @staticmethod
     def find_wav_files(path):
-        return glob.glob(os.path.join(path, "**", "*.wav"), recursive=True)
+        return glob.glob(os.path.join(path, "**", "*.flac"), recursive=True)
 
     def __len__(self):
         return len(self.item_list)
