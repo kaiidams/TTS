@@ -358,7 +358,7 @@ def baker(root_path: str, meta_file: str) -> List[List[str]]:
     return items
 
 
-def kokoro(root_path, meta_file):
+def kokoro(root_path, meta_file, ext='wav'):
     """Japanese single-speaker dataset from https://github.com/kaiidams/Kokoro-Speech-Dataset"""
     txt_file = os.path.join(root_path, meta_file)
     items = []
@@ -366,7 +366,7 @@ def kokoro(root_path, meta_file):
     with open(txt_file, "r") as ttf:
         for line in ttf:
             cols = line.split("|")
-            wav_file = os.path.join(root_path, "wavs", cols[0] + ".wav")
+            wav_file = os.path.join(root_path, "wavs", cols[0] + "." + ext)
             text = cols[2].replace(" ", "")
             items.append([text, wav_file, speaker_name])
     return items
